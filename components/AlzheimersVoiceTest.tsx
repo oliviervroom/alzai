@@ -1,188 +1,260 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { textToSpeech, playAudio } from '@/lib/huggingFaceApi';
+import React, { useState, useEffect } from 'react';
+import { speakWithFallback } from '@/lib/huggingFaceApi';
 
-interface VoiceTestProps {
-  onTestComplete: (score: number, answers: string[]) => void;
+interface AlzheimersVoiceTestProps {
+  onComplete?: (score: number, maxScore: number) => void;
 }
 
-const AlzheimersVoiceTest: React.FC<VoiceTestProps> = ({ onTestComplete }) => {
-  const [isLoading, setIsLoading] = useState(false);
-  const [currentStep, setCurrentStep] = useState(0);
-  const [isListening, setIsListening] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [testWords, setTestWords] = useState<string[]>([]);
+const AlzheimersVoiceTest: React.FC<AlzheimersVoiceTestProps> = ({ onComplete }) => {
+  // Test states
+  const [testActive, setTestActive] = useState<boolean>(false);
+  const [testPhase, setTestPhase] = useState<'intro' | 'wordPresentation' | 'distraction' | 'recall' | 'results'>('intro');
+  const [currentWordIndex, setCurrentWordIndex] = useState<number>(0);
+  const [score, setScore] = useState<number>(0);
   const [userAnswers, setUserAnswers] = useState<string[]>([]);
-  const [instructions, setInstructions] = useState<string[]>([
-    "I'm going to say three words that I want you to remember. Please listen carefully.",
-    "Now, I'd like you to recall the three words I just said.",
-  ]);
+  const [instructions, setInstructions] = useState<string>('This test will assess your memory using voice interaction. You will hear three words and be asked to recall them.');
   
-  const recognitionRef = useRef<any>(null);
+  // Speech recognition
+  const [recognition, setRecognition] = useState<any>(null);
+  const [isListening, setIsListening] = useState<boolean>(false);
+  const [transcript, setTranscript] = useState<string>('');
+  const [error, setError] = useState<string | null>(null);
   
-  // Word lists from Mini-Cog test
+  // Word lists for the test
   const wordLists = [
-    ["Banana", "Sunrise", "Chair"],
-    ["Leader", "Season", "Table"],
-    ["Village", "Kitchen", "Baby"],
-    ["River", "Nation", "Finger"],
-    ["Captain", "Garden", "Picture"],
-    ["Daughter", "Heaven", "Mountain"]
+    ['Apple', 'Watch', 'Penny'],
+    ['Banana', 'Sunset', 'Chair'],
+    ['River', 'Nation', 'Finger'],
+    ['Leader', 'Season', 'Table'],
+    ['Village', 'Kitchen', 'Baby'],
+    ['Mountain', 'Glasses', 'Paper']
   ];
   
-  useEffect(() => {
-    // Select a random word list
+  // Randomly select a word list for this test session
+  const [selectedWordList] = useState<string[]>(() => {
     const randomIndex = Math.floor(Math.random() * wordLists.length);
-    setTestWords(wordLists[randomIndex]);
-    
-    // Initialize speech recognition
-    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-      setErrorMessage('Speech recognition is not supported in this browser. Please try Chrome, Edge, or Safari.');
-      return;
+    return wordLists[randomIndex];
+  });
+  
+  // Initialize speech recognition
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      // @ts-ignore - Web Speech API types
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      
+      if (SpeechRecognition) {
+        const recognitionInstance = new SpeechRecognition();
+        recognitionInstance.continuous = false;
+        recognitionInstance.interimResults = false;
+        recognitionInstance.lang = 'en-US';
+        
+        recognitionInstance.onresult = (event: any) => {
+          const transcript = event.results[0][0].transcript;
+          setTranscript(transcript);
+          processUserResponse(transcript);
+        };
+        
+        recognitionInstance.onerror = (event: any) => {
+          console.error('Speech recognition error:', event.error);
+          setError(`Speech recognition error: ${event.error}`);
+          setIsListening(false);
+        };
+        
+        recognitionInstance.onend = () => {
+          setIsListening(false);
+        };
+        
+        setRecognition(recognitionInstance);
+      } else {
+        setError('Speech recognition is not supported in this browser.');
+      }
     }
-
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    recognitionRef.current = new SpeechRecognition();
-    recognitionRef.current.continuous = false;
-    recognitionRef.current.interimResults = false;
-    recognitionRef.current.lang = 'en-US';
-
-    // Set up event handlers
-    recognitionRef.current.onstart = () => {
-      setIsListening(true);
-    };
-
-    recognitionRef.current.onend = () => {
-      setIsListening(false);
-    };
-
-    recognitionRef.current.onresult = (event: any) => {
-      const transcript = event.results[0][0].transcript;
-      processUserResponse(transcript);
-    };
-
-    recognitionRef.current.onerror = (event: any) => {
-      console.error('Speech recognition error', event.error);
-      setErrorMessage(`Error: ${event.error}`);
-      setIsListening(false);
-    };
-
-    // Clean up
-    return () => {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
-      }
-    };
   }, []);
-
+  
+  // Process the user's spoken response
+  const processUserResponse = (text: string) => {
+    const lowerText = text.toLowerCase();
+    const correctWords = selectedWordList.filter(word => 
+      lowerText.includes(word.toLowerCase())
+    );
+    
+    setScore(correctWords.length);
+    
+    if (testPhase === 'recall') {
+      setTestPhase('results');
+    }
+  };
+  
+  // Start listening for user's spoken response
+  const startListening = () => {
+    if (recognition && !isListening) {
+      setTranscript('');
+      setIsListening(true);
+      recognition.start();
+    }
+  };
+  
+  // Stop listening
+  const stopListening = () => {
+    if (recognition && isListening) {
+      recognition.stop();
+      setIsListening(false);
+    }
+  };
+  
+  // Start the test
   const startTest = async () => {
+    setTestActive(true);
+    setTestPhase('wordPresentation');
+    setCurrentWordIndex(0);
+    setScore(0);
+    setTranscript('');
+    setError(null);
+    
     try {
-      setIsLoading(true);
-      setErrorMessage(null);
+      // Introduce the test
+      await speakWithFallback('I will say three words. Please listen carefully and remember them. You will be asked to recall these words later.');
       
-      // Speak the initial instructions
-      const instructionAudio = await textToSpeech(instructions[0]);
-      await playAudio(instructionAudio);
-      
-      // Speak each word with a pause between
-      for (const word of testWords) {
-        const wordAudio = await textToSpeech(word);
-        await playAudio(wordAudio);
-        // Wait 1 second between words
-        await new Promise(resolve => setTimeout(resolve, 1000));
+      // Present each word with a pause between
+      for (let i = 0; i < selectedWordList.length; i++) {
+        setCurrentWordIndex(i);
+        await speakWithFallback(selectedWordList[i]);
+        await new Promise(resolve => setTimeout(resolve, 1000)); // Pause between words
       }
       
-      // Move to recall step
-      setCurrentStep(1);
+      // Distraction phase
+      setTestPhase('distraction');
+      await speakWithFallback('Now, please wait for a moment.');
+      await new Promise(resolve => setTimeout(resolve, 5000)); // 5-second distraction period
       
-      // Speak the recall instructions
-      const recallAudio = await textToSpeech(instructions[1]);
-      await playAudio(recallAudio);
-      
-      // Start listening for user's response
+      // Recall phase
+      setTestPhase('recall');
+      await speakWithFallback('Please repeat the three words I said earlier.');
       startListening();
       
     } catch (error) {
-      console.error('Error during test:', error);
-      setErrorMessage(`Error during test: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setIsLoading(false);
+      console.error('Test execution error:', error);
+      setError(`An error occurred during the test: ${error}`);
+      setTestPhase('intro');
+      setTestActive(false);
     }
   };
-
-  const startListening = () => {
-    try {
-      recognitionRef.current?.start();
-    } catch (error) {
-      console.error('Failed to start speech recognition:', error);
-      setErrorMessage('Failed to start speech recognition. Please try again.');
+  
+  // Reset the test
+  const resetTest = () => {
+    setTestActive(false);
+    setTestPhase('intro');
+    setCurrentWordIndex(0);
+    setScore(0);
+    setTranscript('');
+    setError(null);
+  };
+  
+  // Render test results
+  const renderResults = () => {
+    let interpretation = '';
+    
+    if (score === 3) {
+      interpretation = 'Perfect score! Your word recall is excellent.';
+    } else if (score === 2) {
+      interpretation = 'Good job! Your word recall is within normal range.';
+    } else if (score === 1) {
+      interpretation = 'You recalled one word. This may indicate mild memory difficulties.';
+    } else {
+      interpretation = 'You did not recall any words. This may indicate significant memory difficulties.';
     }
+    
+    if (onComplete) {
+      onComplete(score, 3);
+    }
+    
+    return (
+      <div className="bg-white p-6 rounded-lg shadow-md">
+        <h3 className="text-xl font-bold mb-4">Test Results</h3>
+        <p className="mb-2">Words you were asked to remember: <span className="font-semibold">{selectedWordList.join(', ')}</span></p>
+        <p className="mb-2">Your response: <span className="italic">"{transcript}"</span></p>
+        <p className="mb-2">Words correctly recalled: <span className="font-semibold">{score} out of 3</span></p>
+        <p className="mb-4">{interpretation}</p>
+        <button 
+          onClick={resetTest}
+          className="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded"
+        >
+          Take Test Again
+        </button>
+      </div>
+    );
   };
-
-  const processUserResponse = (transcript: string) => {
-    // Store the user's response
-    setUserAnswers([transcript]);
-    
-    // Calculate score based on word recall
-    const words = transcript.toLowerCase().split(/\s+/);
-    let score = 0;
-    
-    testWords.forEach(testWord => {
-      if (words.some(word => word === testWord.toLowerCase())) {
-        score++;
-      }
-    });
-    
-    // Complete the test
-    onTestComplete(score, [transcript]);
-  };
-
+  
   return (
-    <div className="voice-test p-6 bg-white rounded-lg shadow-md">
-      <h2 className="text-2xl font-bold mb-4">Alzheimer's Voice Test</h2>
+    <div className="max-w-2xl mx-auto my-8 p-6 bg-gray-50 rounded-lg shadow-lg">
+      <h2 className="text-2xl font-bold mb-6">Alzheimer's Voice Test</h2>
       
-      {errorMessage && (
-        <div className="error-message text-red-500 mb-4 p-3 bg-red-50 rounded">
-          {errorMessage}
+      {error && (
+        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+          <p>Error during test: {error}</p>
         </div>
       )}
       
-      {currentStep === 0 && (
-        <div className="start-test">
-          <p className="mb-4">
-            This test will assess your memory using voice interaction. You will hear three words and be asked to recall them.
-          </p>
-          <button
+      {!testActive && testPhase === 'intro' && (
+        <div>
+          <p className="mb-4">{instructions}</p>
+          <p className="mb-6">This test will assess your memory using voice interaction. You will hear three words and be asked to recall them.</p>
+          <button 
             onClick={startTest}
-            disabled={isLoading}
-            className={`px-6 py-3 rounded-full font-semibold text-white ${
-              isLoading ? 'bg-gray-400' : 'bg-blue-500 hover:bg-blue-600'
-            } transition-colors`}
+            className="bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded"
           >
-            {isLoading ? 'Starting Test...' : 'Start Test'}
+            Start Test
           </button>
         </div>
       )}
       
-      {currentStep === 1 && (
-        <div className="recall-step">
-          <p className="mb-4">
-            Please recall the three words you just heard.
-          </p>
+      {testActive && testPhase === 'wordPresentation' && (
+        <div>
+          <p className="mb-4">Please listen carefully to these words:</p>
+          <div className="flex justify-center items-center h-24 bg-blue-100 rounded-lg mb-4">
+            <p className="text-xl font-semibold">{selectedWordList[currentWordIndex]}</p>
+          </div>
+          <p className="text-center text-gray-500">Word {currentWordIndex + 1} of 3</p>
+        </div>
+      )}
+      
+      {testActive && testPhase === 'distraction' && (
+        <div>
+          <p className="mb-4">Please wait a moment...</p>
+          <div className="w-full bg-gray-200 rounded-full h-2.5 mb-4">
+            <div className="bg-blue-600 h-2.5 rounded-full animate-pulse"></div>
+          </div>
+        </div>
+      )}
+      
+      {testActive && testPhase === 'recall' && (
+        <div>
+          <p className="mb-4">Please repeat the three words you heard earlier:</p>
           {isListening ? (
-            <div className="listening-indicator flex items-center">
-              <div className="animate-pulse mr-2 h-3 w-3 bg-red-500 rounded-full"></div>
-              <p>Listening for your response...</p>
+            <div className="flex flex-col items-center">
+              <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mb-4 animate-pulse">
+                <span className="text-red-500">🎤</span>
+              </div>
+              <p>Listening...</p>
+              {transcript && <p className="mt-2 italic">"{transcript}"</p>}
             </div>
           ) : (
-            <button
+            <button 
               onClick={startListening}
-              className="px-6 py-3 rounded-full font-semibold text-white bg-blue-500 hover:bg-blue-600 transition-colors"
+              className="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded"
             >
-              Speak Now
+              Start Speaking
             </button>
           )}
         </div>
       )}
+      
+      {testPhase === 'results' && renderResults()}
+      
+      <div className="mt-8 text-sm text-gray-500">
+        <p>This application uses the Qwen2-Audio voice model via Hugging Face Inference API.</p>
+        <p>© 2025 Voice Alzheimer's Test</p>
+      </div>
     </div>
   );
 };
